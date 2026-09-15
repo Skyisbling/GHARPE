@@ -1,158 +1,430 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import {
+  FormEvent,
+  useEffect,
+  useState,
+} from "react";
+
+import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Mail, Lock, LogIn, Eye, EyeOff } from "lucide-react";
+
+import {
+  LogIn,
+  Mail,
+  Lock,
+  ShieldCheck,
+} from "lucide-react";
+
 import { useAuth } from "@/contexts/AuthContext";
-import { useLanguage } from "@/contexts/LanguageContext";
 import Button from "@/components/Button";
 
-function LoginPageContent() {
-  const { user, login, redirectTo, setRedirectTo } = useAuth();
-  const { t } = useLanguage();
+export default function LoginPage() {
+  const {
+    user,
+    login,
+    verifyOtp,
+    resendOtp,
+    redirectTo,
+    setRedirectTo,
+  } = useAuth();
+
   const router = useRouter();
-  const searchParams = useSearchParams();
 
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [identifier, setIdentifier] =
+    useState("");
 
-  // If already logged in, redirect away
+  const [password, setPassword] =
+    useState("");
+
+  const [phone, setPhone] =
+    useState("");
+
+  const [otp, setOtp] =
+    useState("");
+
+  const [step, setStep] =
+    useState<
+      "credentials" | "otp"
+    >("credentials");
+
+  const [error, setError] =
+    useState("");
+
+  const [loading, setLoading] =
+    useState(false);
+
+  const [message, setMessage] =
+    useState("");
+
+  // ========================================================
+  // REDIRECT IF ALREADY LOGGED IN
+  // ========================================================
+
   useEffect(() => {
-    if (user) {
-      const dest = redirectTo || searchParams.get("redirect") || "/services";
-      setRedirectTo(null);
-      router.replace(dest);
-    }
-  }, [user, redirectTo, searchParams, router, setRedirectTo]);
+    if (!user) return;
 
-  const handleSubmit = async (e: React.FormEvent) => {
+    const destination =
+      redirectTo ||
+      (
+        user.role === "worker"
+          ? "/worker-dashboard"
+          : "/dashboard"
+      );
+
+    setRedirectTo(null);
+
+    router.replace(
+      destination
+    );
+  }, [
+    user,
+    router,
+    redirectTo,
+    setRedirectTo,
+  ]);
+
+  // ========================================================
+  // STEP 1 — LOGIN
+  // ========================================================
+
+  const send = async (
+    e: FormEvent
+  ) => {
     e.preventDefault();
+
     setError("");
-
-    if (!email.trim()) {
-      setError("Email is required");
-      return;
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      setError("Enter a valid email address");
-      return;
-    }
-    if (!password) {
-      setError("Password is required");
-      return;
-    }
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters");
-      return;
-    }
-
+    setMessage("");
     setLoading(true);
-    const success = await login(email, password);
+
+    const result = await login({
+      identifier,
+      password,
+    });
+
     setLoading(false);
 
-    if (success) {
-      const dest = redirectTo || searchParams.get("redirect") || "/services";
-      setRedirectTo(null);
-      router.replace(dest);
+    if (!result.ok) {
+      setError(
+        result.error ||
+        "Unable to login"
+      );
+
+      return;
+    }
+
+    setPhone(
+      result.phone || ""
+    );
+
+    setStep("otp");
+
+    setMessage(
+      "OTP generated. For localhost, check the Flask terminal."
+    );
+  };
+
+  // ========================================================
+  // STEP 2 — VERIFY OTP
+  // ========================================================
+
+  const verify = async (
+    e: FormEvent
+  ) => {
+    e.preventDefault();
+
+    setError("");
+    setLoading(true);
+
+    const result =
+      await verifyOtp(
+        phone,
+        otp
+      );
+
+    setLoading(false);
+
+    if (!result.ok) {
+      setError(
+        result.error ||
+        "Invalid OTP"
+      );
+
+      return;
+    }
+
+    // AuthContext has already
+    // stored the authenticated user.
+    //
+    // The useEffect above will
+    // redirect automatically.
+  };
+
+  // ========================================================
+  // RESEND OTP
+  // ========================================================
+
+  const resend = async () => {
+    setError("");
+    setMessage("");
+
+    const result =
+      await resendOtp(
+        phone
+      );
+
+    if (result.ok) {
+      setMessage(
+        "New OTP generated. Check the Flask terminal."
+      );
     } else {
-      setError("Invalid credentials. Try any email with 6+ character password.");
+      setError(
+        result.error ||
+        "Unable to resend OTP"
+      );
     }
   };
 
-  // Don't render if already logged in (prevents flash)
-  if (user) return null;
+  // ========================================================
+  // UI
+  // ========================================================
 
   return (
-    <section className="relative overflow-hidden min-h-[80vh] flex items-center justify-center py-12">
+    <section className="relative min-h-[80vh] flex items-center justify-center py-12 px-4 overflow-hidden">
       <div className="absolute inset-0 bg-[#08090D]" />
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_30%,rgba(124,58,237,0.1)_0%,transparent_60%)]" />
 
-      <div className="relative w-full max-w-md mx-auto px-4 z-10">
-        <div className="bg-surface-card border border-border rounded-2xl p-8 shadow-2xl">
-          <div className="text-center mb-8">
-            <div className="w-14 h-14 rounded-2xl gradient-brand text-white flex items-center justify-center mx-auto mb-4 shadow-lg shadow-brand-500/20">
+      <div className="relative z-10 w-full max-w-md bg-surface-card border border-border rounded-2xl p-8 shadow-2xl">
+
+        {/* HEADER */}
+
+        <div className="text-center mb-7">
+
+          <div className="w-14 h-14 rounded-2xl gradient-brand text-white flex items-center justify-center mx-auto mb-4">
+
+            {step === "otp" ? (
+              <ShieldCheck size={24} />
+            ) : (
               <LogIn size={24} />
-            </div>
-            <h1 className="text-2xl font-bold text-ink mb-2">Welcome Back</h1>
-            <p className="text-sm text-ink-secondary">Sign in to access GharPe services</p>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-5">
-            {error && (
-              <div className="bg-accent-pink/10 border border-accent-pink/20 text-accent-pink text-sm rounded-xl px-4 py-3">
-                {error}
-              </div>
             )}
 
-            <div className="space-y-1.5">
-              <label className="block text-sm font-medium text-ink-secondary">Email</label>
-              <div className="relative">
-                <Mail size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted" />
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border bg-surface-muted text-sm text-ink placeholder-ink-muted focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-400/20 transition-all"
-                />
-              </div>
-            </div>
+          </div>
 
-            <div className="space-y-1.5">
-              <label className="block text-sm font-medium text-ink-secondary">Password</label>
-              <div className="relative">
-                <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted" />
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Min 6 characters"
-                  className="w-full pl-10 pr-10 py-2.5 rounded-xl border border-border bg-surface-muted text-sm text-ink placeholder-ink-muted focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-400/20 transition-all"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink transition-colors cursor-pointer"
-                  aria-label={showPassword ? "Hide password" : "Show password"}
-                >
-                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-            </div>
+          <h1 className="text-2xl font-bold text-ink">
+            {step === "otp"
+              ? "Verify your phone"
+              : "Welcome back"}
+          </h1>
 
-            <Button type="submit" loading={loading} className="w-full" size="lg">
-              Sign In
+          <p className="text-sm text-ink-muted mt-2">
+
+            {step === "otp"
+              ? `Enter the 6-digit OTP sent to ${phone}.`
+              : "Login with your email or phone number and password."}
+
+          </p>
+
+        </div>
+
+        {/* ==================================================
+            CREDENTIALS
+        ================================================== */}
+
+        {step === "credentials" ? (
+
+          <form
+            onSubmit={send}
+            className="space-y-4"
+          >
+
+            <Field
+              icon={
+                <Mail size={16} />
+              }
+              type="text"
+              value={identifier}
+              onChange={setIdentifier}
+              placeholder="you@example.com or 9876543210"
+              label="Email or phone number"
+            />
+
+            <Field
+              icon={
+                <Lock size={16} />
+              }
+              type="password"
+              value={password}
+              onChange={setPassword}
+              placeholder="Your password"
+              label="Password"
+            />
+
+            {error && (
+              <p className="text-sm text-red-400">
+                {error}
+              </p>
+            )}
+
+            <Button
+              type="submit"
+              variant="primary"
+              className="w-full"
+              disabled={loading}
+            >
+              {loading
+                ? "Checking account..."
+                : "Continue & send OTP"}
             </Button>
+
+            <p className="text-center text-sm text-ink-muted">
+
+              New here?{" "}
+
+              <Link
+                href="/register"
+                className="text-brand-300"
+              >
+                Create an account
+              </Link>
+
+            </p>
+
           </form>
 
-          <div className="mt-6 text-center">
-            <p className="text-sm text-ink-secondary">
-              Don&apos;t have an account?{" "}
-              <Link href="/register" className="text-brand-400 hover:text-brand-300 font-medium transition-colors">
-                Register
-              </Link>
-            </p>
-          </div>
+        ) : (
 
-          <div className="mt-4 pt-4 border-t border-border">
-            <p className="text-xs text-ink-muted text-center">
-              Demo: use any email and a password with 6+ characters
-            </p>
-          </div>
-        </div>
+          /* ==================================================
+             OTP
+          ================================================== */
+
+          <form
+            onSubmit={verify}
+            className="space-y-4"
+          >
+
+            <input
+              autoFocus
+              required
+              value={otp}
+              onChange={(e) =>
+                setOtp(
+                  e.target.value
+                    .replace(
+                      /\D/g,
+                      ""
+                    )
+                    .slice(0, 6)
+                )
+              }
+              inputMode="numeric"
+              maxLength={6}
+              className="w-full text-center tracking-[0.5em] text-2xl rounded-xl border border-border bg-white/5 py-4 text-ink outline-none focus:border-brand-400"
+              placeholder="000000"
+            />
+
+            {message && (
+              <p className="text-sm text-accent-green">
+                {message}
+              </p>
+            )}
+
+            {error && (
+              <p className="text-sm text-red-400">
+                {error}
+              </p>
+            )}
+
+            <Button
+              type="submit"
+              variant="primary"
+              className="w-full"
+              disabled={loading}
+            >
+              {loading
+                ? "Verifying..."
+                : "Verify & login"}
+            </Button>
+
+            <button
+              type="button"
+              onClick={resend}
+              className="w-full text-sm text-brand-300"
+            >
+              Resend OTP
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setStep(
+                  "credentials"
+                );
+                setOtp("");
+                setError("");
+                setMessage("");
+              }}
+              className="w-full text-sm text-ink-muted"
+            >
+              Use different credentials
+            </button>
+
+          </form>
+        )}
+
       </div>
     </section>
   );
 }
 
-export default function LoginPage() {
+
+// ==========================================================
+// FORM FIELD
+// ==========================================================
+
+function Field({
+  icon,
+  type,
+  value,
+  onChange,
+  placeholder,
+  label,
+}: {
+  icon: React.ReactNode;
+  type: string;
+  value: string;
+  onChange: (
+    value: string
+  ) => void;
+  placeholder: string;
+  label: string;
+}) {
   return (
-    <Suspense fallback={null}>
-      <LoginPageContent />
-    </Suspense>
+    <label className="block">
+
+      <span className="text-sm text-ink-secondary">
+        {label}
+      </span>
+
+      <div className="relative mt-1">
+
+        <span className="absolute left-3 top-3.5 text-ink-muted">
+          {icon}
+        </span>
+
+        <input
+          required
+          type={type}
+          value={value}
+          onChange={(e) =>
+            onChange(
+              e.target.value
+            )
+          }
+          className="w-full rounded-xl border border-border bg-white/5 py-3 pl-10 pr-3 text-ink outline-none focus:border-brand-400"
+          placeholder={placeholder}
+        />
+
+      </div>
+
+    </label>
   );
 }

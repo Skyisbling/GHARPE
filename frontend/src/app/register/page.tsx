@@ -1,499 +1,58 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
-import { User, Briefcase, MapPin, Upload, CheckCircle, X, Camera, FileText, Clock } from "lucide-react";
+import { FormEvent, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { MapPin, Mail, Phone, Lock, User, Briefcase, ShieldCheck, UploadCloud, Check, ChevronLeft, ChevronRight } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
 import Button from "@/components/Button";
-import FormInput, { FormSelect } from "@/components/FormInput";
 import { serviceCategories } from "@/data/workers";
 
-type Tab = "customer" | "worker";
-
-const tabs: { id: Tab; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
-  { id: "customer", label: "Register as Customer", icon: User },
-  { id: "worker", label: "Register as Worker", icon: Briefcase },
-];
-
-// ── Skills by profession ──
-const skillsByProfession: Record<string, string[]> = {
-  electrician: ["Wiring", "Inverter Setup", "MCB Replacement", "LED Installation", "Generator Repair", "Industrial Wiring", "Solar Panel Installation", "CCTV Setup", "Appliance Repair"],
-  plumber: ["Pipe Fitting", "Leak Repair", "Bathroom Renovation", "Water Tank Cleaning", "Drainage Repair", "Water Tank Installation", "Pipeline Installation"],
-  carpenter: ["Furniture Making", "Kitchen Cabinets", "Door Installation", "Wooden Flooring", "Furniture Repair", "Custom Furniture", "Woodwork", "Shelving"],
-  painter: ["Interior Painting", "Exterior Painting", "Texture Work", "Waterproofing", "Wall Treatment", "Paint Consultation"],
-  "domestic-help": ["Cooking", "Laundry", "House Cleaning", "Child Care", "Elderly Companion", "Errands", "Kitchen Management"],
-  caregiver: ["Elderly Care", "Patient Handling", "Physiotherapy Support", "Medication Management", "Post-Surgery Care", "Night Shift Care"],
-  driver: ["Personal Driving", "Long Distance", "Office Commute", "Airport Transfers", "Outstation Trips", "Delivery"],
-  gardener: ["Lawn Maintenance", "Landscaping", "Plant Care", "Irrigation Systems", "Vertical Gardens", "Pruning"],
-  cleaner: ["Deep Cleaning", "Carpet Cleaning", "Post-Construction Cleanup", "Sanitization", "Office Cleaning", "Window Cleaning", "Sofa & Upholstery"],
-  technician: ["AC Repair", "Washing Machine", "Refrigerator", "Geyser Installation", "Microwave Repair", "RO Purifier", "Electrical Appliances"],
-};
-
-const professions = serviceCategories.map((c) => ({ value: c.id, label: c.label }));
+const languages = ["English", "Hindi", "Bengali", "Marathi", "Tamil", "Telugu", "Kannada", "Malayalam"];
 const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const dayLabels: Record<string, string> = { Mon: "Monday", Tue: "Tuesday", Wed: "Wednesday", Thu: "Thursday", Fri: "Friday", Sat: "Saturday", Sun: "Sunday" };
-const idTypes = ["Aadhaar Card", "PAN Card", "Voter ID", "Driving Licence", "Passport", "Other Government ID"];
-const availabilityTypes = ["Full Time", "Part Time", "On Demand", "Emergency Services"];
-const indianStates = ["Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", "Delhi", "Jammu & Kashmir", "Ladakh", "Chandigarh", "Puducherry", "Andaman & Nicobar", "Dadra & Nagar Haveli", "Lakshadweep"];
-
-// ── Image Upload Component ──
-function ImageUpload({ label, accept, preview, onUpload, onRemove, error }: { label: string; accept: string; preview: string | null; onUpload: (file: File) => void; onRemove: () => void; error?: string }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (file.size > 5 * 1024 * 1024) { alert("File size must be under 5MB"); return; }
-      onUpload(file);
-    }
-  };
-  return (
-    <div>
-      <label className="block text-sm font-medium text-ink-secondary mb-1">{label} <span className="text-accent-pink">*</span></label>
-      {preview ? (
-        <div className="relative inline-block">
-          <img src={preview} alt={label} className="w-24 h-24 rounded-xl object-cover border border-border" />
-          <button type="button" onClick={onRemove} className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-accent-pink text-white flex items-center justify-center cursor-pointer" aria-label="Remove image"><X size={14} /></button>
-        </div>
-      ) : (
-        <div onClick={() => inputRef.current?.click()} className="border-2 border-dashed border-border rounded-xl p-6 text-center hover:border-brand-500/30 transition-colors cursor-pointer">
-          <Upload size={24} className="text-ink-muted mx-auto mb-2" />
-          <p className="text-sm text-ink-secondary">Click to upload or drag and drop</p>
-          <p className="text-xs text-ink-muted mt-1">JPG, PNG up to 5MB</p>
-        </div>
-      )}
-      <input ref={inputRef} type="file" accept={accept} onChange={handleChange} className="hidden" />
-      {error && <p className="text-xs text-accent-pink mt-1">{error}</p>}
-    </div>
-  );
-}
-
-// ── Customer Form (with real geolocation) ──
-function CustomerForm({ onSuccess }: { onSuccess: () => void }) {
-  const [loading, setLoading] = useState(false);
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [form, setForm] = useState({ name: "", phone: "", email: "", address: "", language: "English", password: "", confirmPassword: "", terms: false });
-  const [geoLoading, setGeoLoading] = useState(false);
-  const [geoStatus, setGeoStatus] = useState<"" | "success" | "error">("");
-  const [geoMessage, setGeoMessage] = useState("");
-
-  const validate = useCallback(() => {
-    const errs: Record<string, string> = {};
-    if (!form.name.trim()) errs.name = "Full name is required";
-    if (!form.phone.trim()) errs.phone = "Phone number is required";
-    else if (!/^\d{10}$/.test(form.phone.replace(/\D/g, ""))) errs.phone = "Enter a valid 10-digit phone number";
-    if (!form.email.trim()) errs.email = "Email is required";
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) errs.email = "Enter a valid email address";
-    if (!form.address.trim()) errs.address = "Address is required";
-    if (!form.password) errs.password = "Password is required";
-    else if (form.password.length < 8) errs.password = "Must be at least 8 characters";
-    if (form.password !== form.confirmPassword) errs.confirmPassword = "Passwords do not match";
-    if (!form.terms) errs.terms = "You must accept the terms";
-    return errs;
-  }, [form]);
-
-  const handleSubmit = async (e: React.FormEvent) => { e.preventDefault(); const errs = validate(); setErrors(errs); if (Object.keys(errs).length > 0) return; setLoading(true); await new Promise((r) => setTimeout(r, 1500)); setLoading(false); onSuccess(); };
-
-  // ── Real browser geolocation ──
-  const handleGeolocation = () => {
-    if (!navigator.geolocation) {
-      setGeoStatus("error");
-      setGeoMessage("Location detection is not supported by this browser. Please enter your location manually.");
-      return;
-    }
-    setGeoLoading(true);
-    setGeoStatus("");
-    setGeoMessage("");
-
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const { latitude, longitude } = position.coords;
-        try {
-          // Reverse geocode using OpenStreetMap Nominatim (free, no API key)
-          const res = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
-            { headers: { "Accept": "application/json" } }
-          );
-          if (!res.ok) throw new Error("Geocoding failed");
-          const data = await res.json();
-          const addr = data.address || {};
-
-          // Build a readable address from the components
-          const parts: string[] = [];
-          if (addr.house_number) parts.push(addr.house_number);
-          if (addr.road) parts.push(addr.road);
-          if (addr.neighbourhood || addr.suburb) parts.push(addr.neighbourhood || addr.suburb);
-          if (addr.city || addr.town || addr.village) parts.push(addr.city || addr.town || addr.village);
-          if (addr.state) parts.push(addr.state);
-          if (addr.postcode) parts.push(addr.postcode);
-
-          const fullAddress = parts.length > 0 ? parts.join(", ") : data.display_name || "";
-
-          setForm((f) => ({ ...f, address: fullAddress }));
-          setGeoStatus("success");
-          setGeoMessage("Location detected ✓");
-        } catch {
-          // Geocoding failed but we got coords — show coordinates as fallback
-          const fallback = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
-          setForm((f) => ({ ...f, address: fallback }));
-          setGeoStatus("success");
-          setGeoMessage("Location detected ✓ (coordinates shown — address lookup partially failed)");
-        }
-        setGeoLoading(false);
-      },
-      (error) => {
-        setGeoLoading(false);
-        setGeoStatus("error");
-        switch (error.code) {
-          case error.PERMISSION_DENIED:
-            setGeoMessage("Location permission was denied. Please allow location access or enter your location manually.");
-            break;
-          case error.POSITION_UNAVAILABLE:
-            setGeoMessage("Unable to detect your location. Please enter your location manually.");
-            break;
-          case error.TIMEOUT:
-            setGeoMessage("Location detection timed out. Please try again or enter your location manually.");
-            break;
-          default:
-            setGeoMessage("Unable to detect your location. Please enter your location manually.");
-            break;
-        }
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-    );
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="space-y-5">
-      <FormInput label="Full Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} error={errors.name} placeholder="Enter your full name" required />
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <FormInput label="Phone Number" type="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} error={errors.phone} placeholder="9876543210" required />
-        <FormInput label="Email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} error={errors.email} placeholder="you@example.com" required />
-      </div>
-      <div>
-        <FormInput label="Address" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} error={errors.address} placeholder="Enter your address" required />
-        <button
-          type="button"
-          onClick={handleGeolocation}
-          disabled={geoLoading}
-          className={`mt-1.5 text-sm flex items-center gap-1.5 cursor-pointer transition-colors disabled:cursor-not-allowed ${geoLoading ? "text-ink-muted" : "text-brand-400 hover:text-brand-300"}`}
-        >
-          {geoLoading ? (
-            <>
-              <span className="inline-block w-3.5 h-3.5 border-2 border-brand-400 border-t-transparent rounded-full animate-spin" />
-              Detecting your location…
-            </>
-          ) : (
-            <>
-              <MapPin size={14} />
-              Use my current location
-            </>
-          )}
-        </button>
-        {geoStatus === "success" && <p className="text-xs text-accent-green mt-1">{geoMessage}</p>}
-        {geoStatus === "error" && <p className="text-xs text-accent-pink mt-1">{geoMessage}</p>}
-      </div>
-      <FormSelect label="Preferred Language" value={form.language} onChange={(v) => setForm({ ...form, language: v })} options={[{value:"English",label:"English"},{value:"Hindi",label:"हिन्दी"},{value:"Tamil",label:"தமிழ்"},{value:"Kannada",label:"ಕನ್ನಡ"}]} />
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <FormInput label="Password" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} error={errors.password} placeholder="Min 8 characters" required />
-        <FormInput label="Confirm Password" type="password" value={form.confirmPassword} onChange={(e) => setForm({ ...form, confirmPassword: e.target.value })} error={errors.confirmPassword} placeholder="Re-enter password" required />
-      </div>
-      <div>
-        <label className="flex items-start gap-2 cursor-pointer">
-          <input type="checkbox" checked={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.checked })} className="mt-1 rounded border-border text-brand-400 focus:ring-brand-400" />
-          <span className="text-sm text-ink-secondary">I agree to the <a href="#" className="text-brand-400 hover:underline">Terms</a> and <a href="#" className="text-brand-400 hover:underline">Privacy Policy</a></span>
-        </label>
-        {errors.terms && <p className="text-xs text-accent-pink mt-1">{errors.terms}</p>}
-      </div>
-      <Button type="submit" loading={loading} className="w-full" size="lg">Create Account</Button>
-    </form>
-  );
-}
-
-// ── Worker Form (complete rewrite) ──
-function WorkerForm({ onSuccess }: { onSuccess: () => void }) {
-  const [loading, setLoading] = useState(false);
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [step, setStep] = useState<"form" | "review">("form");
-
-  // Personal
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
-  const [profilePhoto, setProfilePhoto] = useState<string | null>(null);
-
-  // Professional
-  const [profession, setProfession] = useState("");
-  const [skills, setSkills] = useState<string[]>([]);
-  const [experience, setExperience] = useState("");
-  const [certFile, setCertFile] = useState<string | null>(null);
-
-  // Availability
-  const [availableDays, setAvailableDays] = useState<string[]>(["Mon", "Tue", "Wed", "Thu", "Fri"]);
-  const [startTime, setStartTime] = useState("09:00");
-  const [endTime, setEndTime] = useState("18:00");
-  const [availabilityType, setAvailabilityType] = useState("Full Time");
-
-  // Service Area
-  const [city, setCity] = useState("");
-  const [state, setState] = useState("");
-  const [district, setDistrict] = useState("");
-  const [pinCode, setPinCode] = useState("");
-  const [serviceRadius, setServiceRadius] = useState("10");
-
-  // Identity
-  const [idType, setIdType] = useState("");
-  const [idNumber, setIdNumber] = useState("");
-  const [idProof, setIdProof] = useState<string | null>(null);
-
-  const toggleSkill = (s: string) => setSkills((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
-  const toggleDay = (d: string) => setAvailableDays((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]);
-  const availableSkills = profession ? (skillsByProfession[profession] || []) : [];
-
-  const validate = useCallback(() => {
-    const errs: Record<string, string> = {};
-    if (!name.trim()) errs.name = "Name is required";
-    if (!phone.trim()) errs.phone = "Phone is required";
-    else if (!/^\d{10}$/.test(phone.replace(/\D/g, ""))) errs.phone = "Enter a valid 10-digit phone number";
-    if (!profession) errs.profession = "Select your profession";
-    if (skills.length === 0) errs.skills = "Select at least one skill";
-    if (!experience) errs.experience = "Years of experience required";
-    if (availableDays.length === 0) errs.days = "Select at least one day";
-    if (!city.trim()) errs.city = "City is required";
-    if (!state.trim()) errs.state = "State is required";
-    if (!idType) errs.idType = "Select ID type";
-    if (!idNumber.trim()) errs.idNumber = "ID number is required";
-    return errs;
-  }, [name, phone, profession, skills, experience, availableDays, city, state, idType, idNumber]);
-
-  const handleReview = (e: React.FormEvent) => {
-    e.preventDefault();
-    const errs = validate();
-    setErrors(errs);
-    if (Object.keys(errs).length > 0) return;
-    setStep("review");
-  };
-
-  const handleSubmit = async () => {
-    setLoading(true);
-    await new Promise((r) => setTimeout(r, 2000));
-    setLoading(false);
-    onSuccess();
-  };
-
-  const maskId = (id: string) => id.length > 4 ? "•".repeat(id.length - 4) + id.slice(-4) : id;
-
-  if (step === "review") {
-    return (
-      <div className="space-y-6">
-        <button onClick={() => setStep("form")} className="text-sm text-brand-400 hover:text-brand-300 cursor-pointer">&larr; Back to edit</button>
-        <h3 className="text-lg font-bold text-ink">Review Your Information</h3>
-
-        <ReviewSection title="Personal Information">
-          <ReviewItem label="Name" value={name} />
-          <ReviewItem label="Phone" value={`+91 ${phone}`} />
-          {email && <ReviewItem label="Email" value={email} />}
-          <ReviewItem label="Profile Photo" value={profilePhoto ? "✓ Uploaded" : "Not uploaded"} />
-        </ReviewSection>
-
-        <ReviewSection title="Professional Profile">
-          <ReviewItem label="Profession" value={professions.find((p) => p.value === profession)?.label || profession} />
-          <ReviewItem label="Skills" value={skills.join(", ")} />
-          <ReviewItem label="Experience" value={`${experience} years`} />
-          <ReviewItem label="Certifications" value={certFile ? "✓ Uploaded" : "Not uploaded"} />
-        </ReviewSection>
-
-        <ReviewSection title="Availability">
-          <ReviewItem label="Available Days" value={availableDays.map((d) => dayLabels[d]).join(", ")} />
-          <ReviewItem label="Working Hours" value={`${startTime} to ${endTime}`} />
-          <ReviewItem label="Type" value={availabilityType} />
-        </ReviewSection>
-
-        <ReviewSection title="Service Area">
-          <ReviewItem label="City" value={city} />
-          <ReviewItem label="State" value={state} />
-          {district && <ReviewItem label="District" value={district} />}
-          {pinCode && <ReviewItem label="PIN Code" value={pinCode} />}
-          <ReviewItem label="Service Radius" value={`Within ${serviceRadius} km`} />
-        </ReviewSection>
-
-        <ReviewSection title="Identity Verification">
-          <ReviewItem label="ID Type" value={idType} />
-          <ReviewItem label="ID Number" value={maskId(idNumber)} />
-          <ReviewItem label="ID Proof" value={idProof ? "✓ Uploaded" : "Not uploaded"} />
-          <p className="text-xs text-ink-muted mt-2">Your government ID will be used for worker verification.</p>
-        </ReviewSection>
-
-        <Button onClick={handleSubmit} loading={loading} className="w-full" size="lg">Submit Registration</Button>
-      </div>
-    );
-  }
-
-  return (
-    <form onSubmit={handleReview} className="space-y-8">
-      {/* Section 1: Personal Information */}
-      <FormSection num={1} title="Personal Information">
-        <FormInput label="Full Name" value={name} onChange={(e) => setName(e.target.value)} error={errors.name} placeholder="e.g., Rahul Sharma" required />
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <FormInput label="Phone Number" type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} error={errors.phone} placeholder="9876543210" required />
-          <FormInput label="Email Address" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Optional" />
-        </div>
-        <ImageUpload label="Worker Profile Photo" accept="image/jpeg,image/png" preview={profilePhoto} onUpload={(f) => { const r = new FileReader(); r.onload = (e) => setProfilePhoto(e.target?.result as string); r.readAsDataURL(f); }} onRemove={() => setProfilePhoto(null)} />
-      </FormSection>
-
-      {/* Section 2: Professional Profile */}
-      <FormSection num={2} title="Professional Profile">
-        <FormSelect label="Profession / Job Type" value={profession} onChange={(v) => { setProfession(v); setSkills([]); }} options={professions} placeholder="Select your profession" error={errors.profession} required />
-      </FormSection>
-
-      {/* Section 3: Skills & Experience */}
-      <FormSection num={3} title="Skills & Experience">
-        {profession ? (
-          <div>
-            <label className="block text-sm font-medium text-ink-secondary mb-2">Select Your Skills <span className="text-accent-pink">*</span></label>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {availableSkills.map((s) => (
-                <button key={s} type="button" onClick={() => toggleSkill(s)} className={`px-3 py-2 rounded-xl border text-sm font-medium transition-all duration-200 cursor-pointer text-left ${skills.includes(s) ? "bg-brand-500/10 border-brand-500/40 text-brand-300" : "border-border text-ink-secondary hover:border-brand-500/30"}`}>{s}</button>
-              ))}
-            </div>
-            {errors.skills && <p className="text-xs text-accent-pink mt-1">{errors.skills}</p>}
-          </div>
-        ) : (
-          <p className="text-sm text-ink-muted">Select a profession above to see available skills.</p>
-        )}
-        <FormInput label="Years of Experience" type="number" value={experience} onChange={(e) => setExperience(e.target.value)} error={errors.experience} placeholder="e.g., 5" required />
-        <ImageUpload label="Certifications (Optional)" accept="image/jpeg,image/png" preview={certFile} onUpload={(f) => { const r = new FileReader(); r.onload = (e) => setCertFile(e.target?.result as string); r.readAsDataURL(f); }} onRemove={() => setCertFile(null)} />
-      </FormSection>
-
-      {/* Section 4: Working Hours & Availability */}
-      <FormSection num={4} title="Working Hours & Availability">
-        <div>
-          <label className="block text-sm font-medium text-ink-secondary mb-2">Available Days <span className="text-accent-pink">*</span></label>
-          <div className="flex flex-wrap gap-2">
-            {days.map((d) => (
-              <button key={d} type="button" onClick={() => toggleDay(d)} className={`px-3 py-1.5 rounded-xl border text-sm font-medium transition-all duration-200 cursor-pointer ${availableDays.includes(d) ? "bg-brand-500/10 border-brand-500/40 text-brand-300" : "border-border text-ink-secondary hover:border-brand-500/30"}`}>{dayLabels[d]}</button>
-            ))}
-          </div>
-          {errors.days && <p className="text-xs text-accent-pink mt-1">{errors.days}</p>}
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <FormInput label="Start Time" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
-          <FormInput label="End Time" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
-        </div>
-        <FormSelect label="Availability Type" value={availabilityType} onChange={setAvailabilityType} options={availabilityTypes.map((a) => ({ value: a, label: a }))} />
-      </FormSection>
-
-      {/* Section 5: Service Area */}
-      <FormSection num={5} title="Service Area">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <FormInput label="City" value={city} onChange={(e) => setCity(e.target.value)} error={errors.city} placeholder="e.g., Mumbai" required />
-          <FormSelect label="State" value={state} onChange={setState} options={indianStates.map((s) => ({ value: s, label: s }))} placeholder="Select state" error={errors.state} required />
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <FormInput label="District / Area" value={district} onChange={(e) => setDistrict(e.target.value)} placeholder="e.g., Andheri West" />
-          <FormInput label="PIN Code" value={pinCode} onChange={(e) => setPinCode(e.target.value)} placeholder="e.g., 400058" />
-        </div>
-        <FormSelect label="Service Radius" value={serviceRadius} onChange={setServiceRadius} options={[{value:"5",label:"Within 5 km"},{value:"10",label:"Within 10 km"},{value:"15",label:"Within 15 km"},{value:"25",label:"Within 25 km"},{value:"custom",label:"Custom"}]} />
-      </FormSection>
-
-      {/* Section 6: Identity Verification */}
-      <FormSection num={6} title="Identity Verification">
-        <p className="text-xs text-ink-muted -mt-4 mb-2">Your government ID will be used for worker verification.</p>
-        <FormSelect label="Government ID Type" value={idType} onChange={setIdType} options={idTypes.map((t) => ({ value: t, label: t }))} placeholder="Select ID type" error={errors.idType} required />
-        <FormInput label="Government ID Number" value={idNumber} onChange={(e) => setIdNumber(e.target.value)} error={errors.idNumber} placeholder="Enter your ID number" required />
-        <ImageUpload label="Government ID Proof" accept="image/jpeg,image/png" preview={idProof} onUpload={(f) => { const r = new FileReader(); r.onload = (e) => setIdProof(e.target?.result as string); r.readAsDataURL(f); }} onRemove={() => setIdProof(null)} />
-      </FormSection>
-
-      <Button type="submit" className="w-full" size="lg">Review & Submit</Button>
-    </form>
-  );
-}
-
-// ── Helper Components ──
-function FormSection({ num, title, children }: { num: number; title: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <h3 className="text-lg font-bold text-ink mb-4 flex items-center gap-2">
-        <div className="w-7 h-7 rounded-full gradient-brand text-white text-xs flex items-center justify-center font-bold">{num}</div>
-        {title}
-      </h3>
-      <div className="space-y-4 pl-9">{children}</div>
-    </div>
-  );
-}
-
-function ReviewSection({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="bg-surface-muted rounded-xl p-4">
-      <h4 className="text-sm font-bold text-ink mb-3">{title}</h4>
-      <div className="space-y-2">{children}</div>
-    </div>
-  );
-}
-
-function ReviewItem({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between text-sm">
-      <span className="text-ink-secondary">{label}</span>
-      <span className="text-ink font-medium text-right max-w-[60%] break-words">{value}</span>
-    </div>
-  );
-}
-
-// ── Society Form (unchanged) ──
-
-// ── Success State ──
-function SuccessState({ tab }: { tab: Tab }) {
-  const messages: Record<Tab, { title: string; desc: string }> = {
-    customer: { title: "Account Created!", desc: "Welcome to GharPe. Browse services and book verified workers." },
-    worker: { title: "Verification Pending", desc: "Your profile has been submitted and is awaiting verification. Our team will review within 3–5 business days." },
-
-  };
-  const msg = messages[tab];
-  return (
-    <div className="text-center py-12">
-      <div className="w-16 h-16 rounded-full bg-accent-orange/10 flex items-center justify-center mx-auto mb-4"><Clock size={32} className="text-accent-orange" /></div>
-      <h3 className="text-2xl font-bold text-ink mb-2">{msg.title}</h3>
-      <p className="text-ink-secondary max-w-md mx-auto">{msg.desc}</p>
-    </div>
-  );
-}
-
-// ── Main Page ──
-function RegisterPageContent() {
-  const searchParams = useSearchParams();
-  const [activeTab, setActiveTab] = useState<Tab>("customer");
-  const [submitted, setSubmitted] = useState(false);
-
-  useEffect(() => { const tab = searchParams.get("tab"); if (tab === "worker" || tab === "customer") setActiveTab(tab); }, [searchParams]);
-
-  return (
-    <>
-      <section className="relative overflow-hidden py-12 md:py-16">
-        <div className="absolute inset-0 bg-[#08090D]" />
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_30%,rgba(124,58,237,0.1)_0%,transparent_60%)]" />
-        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center z-10">
-          <h1 className="text-3xl md:text-5xl font-bold mb-3 tracking-tight"><span className="text-ink">Join </span><span className="shimmer-text">GharPe</span></h1>
-          <p className="text-ink-secondary max-w-xl mx-auto">Register as a customer or join as a verified worker</p>
-        </div>
-        <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-surface-alt to-transparent" />
-      </section>
-      <section className="py-10 md:py-14">
-        <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex border border-border rounded-2xl overflow-hidden mb-8 bg-surface-card">
-            {tabs.map((tab) => (<button key={tab.id} onClick={() => { setActiveTab(tab.id); setSubmitted(false); }} className={`flex-1 px-3 py-3 text-sm font-medium transition-all duration-200 cursor-pointer flex items-center justify-center gap-1.5 ${activeTab === tab.id ? "gradient-brand text-white shadow-lg shadow-brand-500/20" : "text-ink-secondary hover:bg-white/[0.03]"}`}><tab.icon size={16} /><span className="hidden sm:inline">{tab.label}</span><span className="sm:hidden">{tab.label.split(" ").pop()}</span></button>))}
-          </div>
-          <div className="bg-surface-card border border-border rounded-2xl p-6 md:p-8">
-            {submitted ? <SuccessState tab={activeTab} /> : (<>{activeTab === "customer" && <CustomerForm onSuccess={() => setSubmitted(true)} />}{activeTab === "worker" && <WorkerForm onSuccess={() => setSubmitted(true)} />}</>)}
-          </div>
-        </div>
-      </section>
-    </>
-  );
-}
+const idTypes = ["Aadhaar", "Voter ID", "PAN Card", "Driving Licence", "Passport", "Other"];
 
 export default function RegisterPage() {
-  return (
-    <Suspense fallback={null}>
-      <RegisterPageContent />
-    </Suspense>
-  );
+  const { register, verifyOtp, resendOtp } = useAuth();
+  const router = useRouter();
+  const [role,setRole]=useState<"customer"|"worker">("customer");
+  const [otpStep,setOtpStep]=useState(false); const [otp,setOtp]=useState(""); const [otpPhone,setOtpPhone]=useState("");
+  const [customer,setCustomer]=useState({name:"",phone:"",email:"",address:"",preferred_language:"English",password:"",confirm_password:"",latitude:"",longitude:"",terms_accepted:false});
+  const [worker,setWorker]=useState({name:"",phone:"",address:"",email:"",password:"",confirm_password:"",profile_photo_data:"",profession:"",experience_years:"",skills:"",certifications:"",available_days:["Mon","Tue","Wed","Thu","Fri"],start_time:"09:00",end_time:"18:00",availability_type:"regular",city:"",state:"",district:"",pincode:"",id_type:"Aadhaar",id_number:"",id_proof_data:""});
+  const [workerStep,setWorkerStep]=useState(1); const [error,setError]=useState(""); const [message,setMessage]=useState(""); const [loading,setLoading]=useState(false); const [locationLoading,setLocationLoading]=useState(false);
+
+  const updateCustomer=(k:string,v:string|boolean)=>setCustomer(c=>({...c,[k]:v}));
+  const updateWorker=(k:string,v:string|string[])=>setWorker(w=>({...w,[k]:v}));
+
+  const useLocation=()=>{setLocationLoading(true);setError("");if(!navigator.geolocation){setError("Live location is not supported by this browser.");setLocationLoading(false);return;}navigator.geolocation.getCurrentPosition(p=>{updateCustomer("latitude",String(p.coords.latitude));updateCustomer("longitude",String(p.coords.longitude));setLocationLoading(false);setMessage("Current location captured successfully.");},()=>{setError("Location permission was denied or unavailable.");setLocationLoading(false);},{enableHighAccuracy:true,timeout:10000});};
+
+  const fileToData=(file:File,setter:(data:string)=>void)=>{setError("");if(file.size>3*1024*1024){setError("Please choose a file smaller than 3 MB.");return;}if(!["image/jpeg","image/png","image/webp","application/pdf"].includes(file.type)){setError("Use JPG, PNG, WEBP or PDF.");return;}const reader=new FileReader();reader.onload=()=>setter(String(reader.result));reader.readAsDataURL(file);};
+
+  const submit=async(e:FormEvent)=>{e.preventDefault();setError("");setMessage("");if(role==="worker"&&workerStep<6){if(!validateWorkerStep(workerStep))return;setWorkerStep(s=>s+1);return;}setLoading(true);const payload=role==="customer"?customer:{...worker,experience_years:Number(worker.experience_years||0),skills:worker.skills,certifications:worker.certifications,available_days:worker.available_days};const result=await register({...payload,role});setLoading(false);if(!result.ok)return setError(result.error||"Registration failed.");setOtpPhone(result.phone||((role==="customer")?customer.phone:worker.phone));setOtpStep(true);setMessage("OTP generated. For localhost, check the Flask terminal.");};
+
+  const validateWorkerStep=(step:number)=>{const checks:Record<number,boolean>={1:!!worker.name&&!!worker.phone&&!!worker.address&&!!worker.email&&!!worker.password&&!!worker.confirm_password&&worker.password===worker.confirm_password&&!!worker.profile_photo_data,2:!!worker.profession,3:!!worker.experience_years&&!!worker.skills,4:worker.available_days.length>0&&!!worker.start_time&&!!worker.end_time&&!!worker.availability_type,5:!!worker.city&&!!worker.state&&!!worker.district&&/^\d{6}$/.test(worker.pincode),6:!!worker.id_type&&!!worker.id_number&&!!worker.id_proof_data};if(!checks[step]){setError(step===1&&worker.password!==worker.confirm_password?"Passwords do not match.":`Please complete all required fields in step ${step}.`);return false;}return true;};
+  const verify=async(e:FormEvent)=>{e.preventDefault();setError("");setLoading(true);const r=await verifyOtp(otpPhone,otp);setLoading(false);if(!r.ok)return setError(r.error||"Invalid OTP");const raw=localStorage.getItem("gharpe-user");const u=raw?JSON.parse(raw):null;router.replace(u?.role==="worker"?"/worker-dashboard":"/dashboard");};
+  const resend=async()=>{setError("");const r=await resendOtp(otpPhone);if(r.ok)setMessage("New OTP generated. Check the Flask terminal.");else setError(r.error||"Unable to resend OTP");};
+
+  const workerTitles=["Personal information","Professional profile","Skills & experience","Working hours & availability","Service area","Identity verification"];
+  const progress=useMemo(()=>Math.round((workerStep/6)*100),[workerStep]);
+
+  return <section className="relative min-h-[80vh] py-10 px-4 overflow-hidden"><div className="absolute inset-0 bg-[#08090D]"/><div className="relative z-10 w-full max-w-3xl mx-auto bg-surface-card border border-border rounded-2xl p-6 md:p-8 shadow-2xl">
+    {otpStep?<OtpView phone={otpPhone} otp={otp} setOtp={setOtp} verify={verify} resend={resend} error={error} message={message} loading={loading}/>:<>
+      <div className="text-center mb-7"><div className="w-14 h-14 mx-auto mb-4 rounded-2xl gradient-brand flex items-center justify-center text-white"><ShieldCheck size={26}/></div><h1 className="text-2xl font-bold text-ink">Create your GharPe account</h1><p className="text-sm text-ink-muted mt-2">Choose how you want to use GharPe.</p></div>
+      <div className="grid grid-cols-2 gap-2 mb-7"><RoleButton active={role==="customer"} onClick={()=>{setRole("customer");setWorkerStep(1);setError("")}}>Customer</RoleButton><RoleButton active={role==="worker"} onClick={()=>{setRole("worker");setWorkerStep(1);setError("")}}>Worker</RoleButton></div>
+      {role==="customer"?<form onSubmit={submit} className="space-y-5"><div className="grid md:grid-cols-2 gap-4"><Field icon={<User size={16}/>} label="Full name" value={customer.name} onChange={v=>updateCustomer("name",v)} placeholder="Your full name"/><Field icon={<Phone size={16}/>} label="Phone number" type="tel" value={customer.phone} onChange={v=>updateCustomer("phone",v)} placeholder="9876543210"/><Field icon={<Mail size={16}/>} label="Email address" type="email" value={customer.email} onChange={v=>updateCustomer("email",v)} placeholder="you@example.com"/><Field icon={<Lock size={16}/>} label="Password" type="password" value={customer.password} onChange={v=>updateCustomer("password",v)} placeholder="Minimum 8 characters"/><Field icon={<Lock size={16}/>} label="Re-enter password" type="password" value={customer.confirm_password} onChange={v=>updateCustomer("confirm_password",v)} placeholder="Repeat password"/></div><label className="block"><span className="text-sm text-ink-secondary">Address</span><textarea required rows={3} value={customer.address} onChange={e=>updateCustomer("address",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-white/5 px-3 py-3 text-ink outline-none focus:border-brand-400" placeholder="House / street / locality"/></label><div className="rounded-xl border border-border p-4"><div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><div><p className="text-sm font-semibold text-ink">Use my current location</p><p className="text-xs text-ink-muted mt-1">Automatically fetch your live browser location.</p></div><button type="button" onClick={useLocation} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-brand-500/30 text-brand-300 text-sm font-semibold"> <MapPin size={15}/>{locationLoading?"Fetching...":"Use my current location"}</button></div>{customer.latitude&&<p className="text-xs text-accent-green mt-2">Location captured: {Number(customer.latitude).toFixed(5)}, {Number(customer.longitude).toFixed(5)}</p>}</div><label className="block"><span className="text-sm text-ink-secondary">Preferred language</span><select value={customer.preferred_language} onChange={e=>updateCustomer("preferred_language",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-surface-card px-3 py-3 text-ink"><>{languages.map(l=><option key={l}>{l}</option>)}</></select></label><Terms checked={customer.terms_accepted} onChange={v=>updateCustomer("terms_accepted",v)}/>{error&&<p className="text-sm text-red-400">{error}</p>}{message&&<p className="text-sm text-accent-green">{message}</p>}<Button type="submit" variant="primary" className="w-full" disabled={loading}>{loading?"Creating account...":"Create account & send OTP"}</Button></form>:<form onSubmit={submit} className="space-y-6"><div className="flex items-center justify-between"><div><p className="text-sm font-semibold text-ink">Step {workerStep} of 6</p><p className="text-xs text-ink-muted mt-1">{workerTitles[workerStep-1]}</p></div><span className="text-xs text-brand-300">{progress}%</span></div><div className="h-1.5 rounded-full bg-white/10 overflow-hidden"><div className="h-full gradient-brand transition-all" style={{width:`${progress}%`}}/></div><WorkerStep step={workerStep} worker={worker} update={updateWorker} fileToData={fileToData}/>{error&&<p className="text-sm text-red-400">{error}</p>}{message&&<p className="text-sm text-accent-green">{message}</p>}<div className="flex gap-3"><button type="button" disabled={workerStep===1||loading} onClick={()=>{setWorkerStep(s=>Math.max(1,s-1));setError("")}} className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl border border-border py-3 text-sm font-semibold text-ink-secondary disabled:opacity-40"><ChevronLeft size={16}/>Back</button><Button type="submit" variant="primary" className="flex-1" disabled={loading}>{workerStep<6?<><span>Next</span><ChevronRight size={16}/></>:loading?"Creating application...":"Create account & send OTP"}</Button></div></form>}
+    </>}
+  </div></section>;
 }
+
+function RoleButton({active,onClick,children}:{active:boolean;onClick:()=>void;children:React.ReactNode}){return <button type="button" onClick={onClick} className={`p-3 rounded-xl border text-sm font-semibold ${active?"border-brand-400 bg-brand-500/10 text-brand-300":"border-border text-ink-secondary"}`}>{children}</button>}
+function Field({icon,label,value,onChange,placeholder,type="text"}:{icon:React.ReactNode;label:string;value:string;onChange:(v:string)=>void;placeholder:string;type?:string}){return <label className="block"><span className="text-sm text-ink-secondary">{label}</span><div className="relative mt-1"><span className="absolute left-3 top-3.5 text-ink-muted">{icon}</span><input required type={type} value={value} onChange={e=>onChange(e.target.value)} className="w-full rounded-xl border border-border bg-white/5 py-3 pl-10 pr-3 text-ink outline-none focus:border-brand-400" placeholder={placeholder}/></div></label>}
+function Terms({checked,onChange}:{checked:boolean;onChange:(v:boolean)=>void}){return <label className="flex items-start gap-3 text-sm text-ink-secondary cursor-pointer"><input required type="checkbox" checked={checked} onChange={e=>onChange(e.target.checked)} className="mt-1 h-4 w-4"/><span>I agree to the <a href="/help" className="text-brand-300 hover:underline">Terms</a> and <a href="/help" className="text-brand-300 hover:underline">Conditions</a>.</span></label>}
+function UploadBox({label,value,onFile,accept="image/*,.pdf"}:{label:string;value:string;onFile:(f:File)=>void;accept?:string}){return <label className="block cursor-pointer"><span className="text-sm text-ink-secondary">{label}</span><div className="mt-1 rounded-2xl border-2 border-dashed border-border hover:border-brand-400/50 bg-white/[0.02] p-6 text-center"><UploadCloud className="mx-auto text-brand-300" size={28}/><p className="text-sm text-ink mt-2">Drag & drop or click to upload</p><p className="text-xs text-ink-muted mt-1">JPG, PNG, WEBP or PDF · max 3 MB</p>{value&&<p className="text-xs text-accent-green mt-2 flex items-center justify-center gap-1"><Check size={13}/>File selected</p>}<input type="file" accept={accept} className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)onFile(f)}}/></div></label>}
+function WorkerStep({step,worker,update,fileToData}:{step:number;worker:any;update:(k:string,v:string|string[])=>void;fileToData:(f:File,setter:(d:string)=>void)=>void}){if(step===1)return <div className="space-y-4"><div className="grid md:grid-cols-2 gap-4"><Field icon={<User size={16}/>} label="Name" value={worker.name} onChange={v=>update("name",v)} placeholder="Full name"/><Field icon={<Phone size={16}/>} label="Phone number" type="tel" value={worker.phone} onChange={v=>update("phone",v)} placeholder="9876543210"/><Field icon={<Mail size={16}/>} label="Email address" type="email" value={worker.email} onChange={v=>update("email",v)} placeholder="you@example.com"/><Field icon={<Lock size={16}/>} label="Password" type="password" value={worker.password} onChange={v=>update("password",v)} placeholder="Minimum 8 characters"/><Field icon={<Lock size={16}/>} label="Re-enter password" type="password" value={worker.confirm_password} onChange={v=>update("confirm_password",v)} placeholder="Repeat password"/></div><label className="block"><span className="text-sm text-ink-secondary">Address</span><textarea required rows={3} value={worker.address} onChange={e=>update("address",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-white/5 px-3 py-3 text-ink" placeholder="Residential address"/></label><UploadBox label="Profile photo" value={worker.profile_photo_data} onFile={f=>fileToData(f,d=>update("profile_photo_data",d))} accept="image/*"/></div>;
+if(step===2)return <label className="block"><span className="text-sm text-ink-secondary">Select profession</span><select required value={worker.profession} onChange={e=>update("profession",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-surface-card px-3 py-3 text-ink"><option value="">Choose a profession</option>{serviceCategories.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}</select></label>;
+if(step===3)return <div className="space-y-4"><Field icon={<Briefcase size={16}/>} label="Years of experience" type="number" value={worker.experience_years} onChange={v=>update("experience_years",v)} placeholder="e.g. 5"/><label className="block"><span className="text-sm text-ink-secondary">Skills</span><textarea required rows={3} value={worker.skills} onChange={e=>update("skills",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-white/5 px-3 py-3 text-ink" placeholder="Wiring, repairs, installations"/><span className="text-xs text-ink-muted">Separate skills with commas.</span></label><label className="block"><span className="text-sm text-ink-secondary">Certifications</span><textarea rows={3} value={worker.certifications} onChange={e=>update("certifications",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-white/5 px-3 py-3 text-ink" placeholder="ITI, trade certificates, licences"/><span className="text-xs text-ink-muted">Separate certifications with commas.</span></label></div>;
+if(step===4)return <div className="space-y-5"><div><span className="text-sm text-ink-secondary">Available days</span><div className="grid grid-cols-4 sm:grid-cols-7 gap-2 mt-2">{days.map(d=>{const active=worker.available_days.includes(d);return <button type="button" key={d} onClick={()=>update("available_days",active?worker.available_days.filter((x:string)=>x!==d):[...worker.available_days,d])} className={`rounded-xl py-2 text-sm border ${active?"border-brand-400 bg-brand-500/10 text-brand-300":"border-border text-ink-secondary"}`}>{d}</button>})}</div></div><div className="grid md:grid-cols-2 gap-4"><label className="block text-sm text-ink-secondary">Start time<input required type="time" value={worker.start_time} onChange={e=>update("start_time",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-white/5 px-3 py-3 text-ink"/></label><label className="block text-sm text-ink-secondary">End time<input required type="time" value={worker.end_time} onChange={e=>update("end_time",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-white/5 px-3 py-3 text-ink"/></label></div><label className="block text-sm text-ink-secondary">Availability type<select value={worker.availability_type} onChange={e=>update("availability_type",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-surface-card px-3 py-3 text-ink"><option value="regular">Regular</option><option value="full_time">Full time</option><option value="part_time">Part time</option><option value="on_demand">On demand</option></select></label></div>;
+if(step===5)return <div className="grid md:grid-cols-2 gap-4"><Field icon={<MapPin size={16}/>} label="City" value={worker.city} onChange={v=>update("city",v)} placeholder="City"/><Field icon={<MapPin size={16}/>} label="State" value={worker.state} onChange={v=>update("state",v)} placeholder="State"/><Field icon={<MapPin size={16}/>} label="District" value={worker.district} onChange={v=>update("district",v)} placeholder="District"/><Field icon={<MapPin size={16}/>} label="Pincode" value={worker.pincode} onChange={v=>update("pincode",v.replace(/\D/g,"").slice(0,6))} placeholder="700001"/></div>;
+return <div className="space-y-4"><label className="block text-sm text-ink-secondary">ID type<select required value={worker.id_type} onChange={e=>update("id_type",e.target.value)} className="mt-1 w-full rounded-xl border border-border bg-surface-card px-3 py-3 text-ink">{idTypes.map(t=><option key={t}>{t}</option>)}</select></label><Field icon={<ShieldCheck size={16}/>} label="ID number" value={worker.id_number} onChange={v=>update("id_number",v)} placeholder="Enter ID number"/><UploadBox label="ID proof" value={worker.id_proof_data} onFile={f=>fileToData(f,d=>update("id_proof_data",d))}/><p className="text-xs text-ink-muted">Your registration enters the worker application database first. Marketplace listing requires verification against the official worker registry.</p></div>}
+function OtpView({phone,otp,setOtp,verify,resend,error,message,loading}:{phone:string;otp:string;setOtp:(v:string)=>void;verify:(e:FormEvent)=>void;resend:()=>void;error:string;message:string;loading:boolean}){return <div><div className="text-center mb-7"><h1 className="text-2xl font-bold text-ink">Verify your phone</h1><p className="text-sm text-ink-muted mt-2">Enter the 6-digit OTP for {phone}.</p></div>{message&&<p className="text-sm text-accent-green mb-4">{message}</p>}<form onSubmit={verify} className="space-y-4"><input required autoFocus value={otp} onChange={e=>setOtp(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" maxLength={6} className="w-full text-center tracking-[0.5em] text-2xl rounded-xl border border-border bg-white/5 py-4 text-ink outline-none focus:border-brand-400" placeholder="000000"/>{error&&<p className="text-sm text-red-400">{error}</p>}<Button type="submit" variant="primary" className="w-full" disabled={loading}>{loading?"Verifying...":"Verify & continue"}</Button><button type="button" onClick={resend} className="w-full text-sm text-brand-300">Resend OTP</button></form></div>}

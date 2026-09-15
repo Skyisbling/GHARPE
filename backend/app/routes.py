@@ -3,31 +3,17 @@ import random
 from datetime import datetime, timedelta
 
 import jwt
-
 from flask import Blueprint, jsonify, request
-
-from werkzeug.security import check_password_hash
-
 from sqlalchemy import text
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from .extensions import db
-from .models import User, OTPVerification, Worker
+from .models import User, OTPVerification, Worker, WorkerApplication, Booking
 
-
-api = Blueprint(
-    "api",
-    __name__,
-    url_prefix="/api"
-)
-
-
-# ============================================================
-# CONFIG
-# ============================================================
+api = Blueprint("api", __name__, url_prefix="/api")
 
 OTP_EXPIRY_MINUTES = 5
 MAX_OTP_ATTEMPTS = 5
-
 JWT_EXPIRY_HOURS = 24
 
 JWT_SECRET = os.getenv(
@@ -41,24 +27,12 @@ JWT_SECRET = os.getenv(
 # ============================================================
 
 def normalize_phone(phone):
-    """
-    Normalize Indian phone numbers.
-
-    Accepted examples:
-
-    9876543210
-    +919876543210
-    919876543210
-    """
-
     if not phone:
         return None
 
-    phone = str(phone).strip()
-
-    # Remove spaces, hyphens and brackets
     phone = (
-        phone
+        str(phone)
+        .strip()
         .replace(" ", "")
         .replace("-", "")
         .replace("(", "")
@@ -67,101 +41,130 @@ def normalize_phone(phone):
 
     if phone.startswith("+91"):
         phone = phone[3:]
-
     elif phone.startswith("91") and len(phone) == 12:
         phone = phone[2:]
 
-    if len(phone) != 10:
-        return None
-
-    if not phone.isdigit():
-        return None
-
-    if phone[0] not in "6789":
+    if (
+        len(phone) != 10
+        or not phone.isdigit()
+        or phone[0] not in "6789"
+    ):
         return None
 
     return phone
 
 
+def validate_email(email):
+    if not email:
+        return False
+
+    email = str(email).strip().lower()
+
+    if "@" not in email:
+        return False
+
+    domain = email.split("@")[-1]
+
+    return "." in domain and len(domain) > 1
+
+
 def generate_otp():
-    return str(
-        random.randint(100000, 999999)
-    )
+    return str(random.randint(100000, 999999))
 
 
 def create_token(user):
-    payload = {
-        "user_id": user.id,
-        "role": user.role,
-        "phone": user.phone,
-        "exp": datetime.utcnow()
-        + timedelta(hours=JWT_EXPIRY_HOURS),
-    }
-
     return jwt.encode(
-        payload,
+        {
+            "user_id": user.id,
+            "role": user.role,
+            "phone": user.phone,
+            "exp": datetime.utcnow()
+            + timedelta(hours=JWT_EXPIRY_HOURS),
+        },
         JWT_SECRET,
-        algorithm="HS256"
+        algorithm="HS256",
     )
 
 
 def get_auth_user():
-    authorization = request.headers.get(
-        "Authorization",
-        ""
-    )
+    auth = request.headers.get("Authorization", "")
 
-    if not authorization.startswith("Bearer "):
+    if not auth.startswith("Bearer "):
         return None
 
-    token = authorization.split(
-        " ",
-        1
-    )[1]
-
     try:
+        token = auth.split(" ", 1)[1]
+
         payload = jwt.decode(
             token,
             JWT_SECRET,
-            algorithms=["HS256"]
+            algorithms=["HS256"],
         )
 
-        user = db.session.get(
+        return db.session.get(
             User,
             payload.get("user_id")
         )
 
-        return user
-
     except (
         jwt.ExpiredSignatureError,
-        jwt.InvalidTokenError
+        jwt.InvalidTokenError,
     ):
         return None
 
 
+def require_auth():
+    user = get_auth_user()
+
+    if (
+        not user
+        or not user.phone_verified
+        or user.status != "active"
+    ):
+        return None, (
+            jsonify({
+                "error": "Authentication required"
+            }),
+            401,
+        )
+
+    return user, None
+
+
 def send_otp(phone, otp):
-    """
-    DEVELOPMENT OTP SENDER
-
-    For now we print the OTP in the backend terminal.
-
-    Later this function will be replaced by
-    a real SMS provider without changing the
-    registration / verification architecture.
-    """
-
-    print("")
-    print("=" * 60)
-    print("GHARPE OTP")
-    print("=" * 60)
-    print(f"Phone: {phone}")
-    print(f"OTP:   {otp}")
+    print("\n" + "=" * 60)
+    print("GHARPE OTP (LOCAL DEVELOPMENT)")
+    print("Phone:", phone)
+    print("OTP:", otp)
     print("Valid for: 5 minutes")
-    print("=" * 60)
-    print("")
+    print("=" * 60 + "\n")
 
     return True
+
+
+def parse_list(value):
+    if isinstance(value, list):
+        return [
+            str(x).strip()
+            for x in value
+            if str(x).strip()
+        ]
+
+    if isinstance(value, str):
+        return [
+            x.strip()
+            for x in value.split(",")
+            if x.strip()
+        ]
+
+    return []
+
+
+def parse_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ============================================================
@@ -172,32 +175,31 @@ def send_otp(phone, otp):
 def health():
     return jsonify({
         "status": "ok",
-        "service": "gharpe-backend"
+        "service": "gharpe-backend",
     })
 
 
 @api.get("/health/db")
 def database_health():
-    db.session.execute(
-        text("SELECT 1")
-    )
+    db.session.execute(text("SELECT 1"))
 
     return jsonify({
         "status": "ok",
-        "database": "connected"
+        "database": "connected",
     })
 
 
 # ============================================================
-# AUTH — REGISTER
+# REGISTER
 # ============================================================
 
 @api.post("/auth/register")
 def register():
+    data = request.get_json(silent=True) or {}
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+    role = str(
+        data.get("role", "customer")
+    ).strip().lower()
 
     name = str(
         data.get("name", "")
@@ -207,19 +209,30 @@ def register():
         data.get("phone")
     )
 
-    role = str(
-        data.get("role", "customer")
+    email = str(
+        data.get("email", "")
     ).strip().lower()
 
-    allowed_roles = {
-        "customer",
-        "worker",
-        "cooperative"
-    }
+    password = str(
+        data.get("password", "")
+    )
+
+    confirm_password = str(
+        data.get("confirm_password", "")
+    )
+
+    # --------------------------------------------------------
+    # BASIC VALIDATION
+    # --------------------------------------------------------
+
+    if role not in {"customer", "worker"}:
+        return jsonify({
+            "error": "Invalid registration role"
+        }), 400
 
     if not name:
         return jsonify({
-            "error": "Name is required"
+            "error": "Full name is required"
         }), 400
 
     if not phone:
@@ -227,39 +240,246 @@ def register():
             "error": "Valid Indian phone number is required"
         }), 400
 
-    if role not in allowed_roles:
+    if not validate_email(email):
         return jsonify({
-            "error": "Invalid registration role"
+            "error": "Valid email address is required"
         }), 400
+
+    if len(password) < 8:
+        return jsonify({
+            "error": "Password must be at least 8 characters"
+        }), 400
+
+    if password != confirm_password:
+        return jsonify({
+            "error": "Passwords do not match"
+        }), 400
+
+    if not bool(data.get("terms_accepted")):
+        return jsonify({
+            "error": (
+                "You must agree to the "
+                "Terms and Conditions"
+            )
+        }), 400
+
+    # --------------------------------------------------------
+    # DUPLICATE ACCOUNT CHECK
+    # --------------------------------------------------------
+
+    existing_email = User.query.filter(
+        User.email == email
+    ).first()
+
+    if existing_email and existing_email.phone != phone:
+        return jsonify({
+            "error": (
+                "An account with this email "
+                "already exists"
+            )
+        }), 409
 
     user = User.query.filter_by(
         phone=phone
     ).first()
 
-    if user:
+    if user and user.phone_verified:
+        return jsonify({
+            "error": (
+                "An account with this phone "
+                "number already exists"
+            )
+        }), 409
 
-        if user.phone_verified:
-            return jsonify({
-                "error": "An account with this phone number already exists",
-                "user": user.to_dict()
-            }), 409
-
-        user.name = name
-        user.role = role
-
-    else:
-
-        user = User(
-            name=name,
-            phone=phone,
-            role=role,
-            phone_verified=False,
-            status="pending"
-        )
-
+    if not user:
+        user = User(phone=phone)
         db.session.add(user)
 
-    # Invalidate old OTPs
+    # --------------------------------------------------------
+    # USER DATA
+    # --------------------------------------------------------
+
+    user.name = name
+    user.email = email
+    user.address = (
+        str(data.get("address", "")).strip()
+        or None
+    )
+
+    user.preferred_language = (
+        str(
+            data.get(
+                "preferred_language",
+                "English"
+            )
+        ).strip()
+        or "English"
+    )
+
+    user.password_hash = generate_password_hash(
+        password
+    )
+
+    user.terms_accepted = True
+
+    user.latitude = data.get("latitude")
+    user.longitude = data.get("longitude")
+
+    user.role = role
+    user.phone_verified = False
+    user.status = "pending"
+
+    # --------------------------------------------------------
+    # CUSTOMER VALIDATION
+    # --------------------------------------------------------
+
+    if role == "customer" and not user.address:
+        return jsonify({
+            "error": "Address is required"
+        }), 400
+
+    # --------------------------------------------------------
+    # WORKER REGISTRATION
+    # --------------------------------------------------------
+
+    if role == "worker":
+
+        required = [
+            "address",
+            "profession",
+            "city",
+            "state",
+            "district",
+            "pincode",
+            "id_type",
+            "id_number",
+            "id_proof_data",
+        ]
+
+        missing = [
+            field
+            for field in required
+            if not str(
+                data.get(field, "")
+            ).strip()
+        ]
+
+        if missing:
+            return jsonify({
+                "error": (
+                    "Missing worker fields: "
+                    + ", ".join(missing)
+                )
+            }), 400
+
+        pincode = str(
+            data.get("pincode", "")
+        ).strip()
+
+        if len(pincode) != 6 or not pincode.isdigit():
+            return jsonify({
+                "error": "Pincode must be 6 digits"
+            }), 400
+
+        application = WorkerApplication.query.filter_by(
+            user_id=user.id
+        ).first()
+
+        if not application:
+            application = WorkerApplication(
+                user_id=user.id
+            )
+
+            db.session.add(application)
+
+        application.name = name
+        application.phone = phone
+        application.email = email
+
+        application.address = str(
+            data.get("address")
+        ).strip()
+
+        application.profile_photo_data = (
+            data.get("profile_photo_data")
+        )
+
+        application.profession = str(
+            data.get("profession")
+        ).strip()
+
+        application.experience_years = parse_int(
+            data.get("experience_years")
+        )
+
+        application.skills = parse_list(
+            data.get("skills")
+        )
+
+        application.certifications = parse_list(
+            data.get("certifications")
+        )
+
+        application.available_days = parse_list(
+            data.get("available_days")
+        )
+
+        application.start_time = (
+            str(
+                data.get("start_time", "")
+            ).strip()
+            or None
+        )
+
+        application.end_time = (
+            str(
+                data.get("end_time", "")
+            ).strip()
+            or None
+        )
+
+        application.availability_type = (
+            str(
+                data.get(
+                    "availability_type",
+                    "regular"
+                )
+            ).strip()
+            or "regular"
+        )
+
+        application.city = str(
+            data.get("city")
+        ).strip()
+
+        application.state = str(
+            data.get("state")
+        ).strip()
+
+        application.district = str(
+            data.get("district")
+        ).strip()
+
+        application.pincode = pincode
+
+        application.id_type = str(
+            data.get("id_type")
+        ).strip()
+
+        application.id_number = str(
+            data.get("id_number")
+        ).strip()
+
+        application.id_proof_data = str(
+            data.get("id_proof_data")
+        ).strip()
+
+        application.verification_status = "pending"
+
+    # --------------------------------------------------------
+    # CREATE OTP
+    # --------------------------------------------------------
+
     OTPVerification.query.filter_by(
         phone=phone,
         verified=False
@@ -269,47 +489,191 @@ def register():
 
     otp = generate_otp()
 
-    otp_record = OTPVerification(
-        phone=phone,
-        otp_hash=__import__(
-            "werkzeug.security",
-            fromlist=["generate_password_hash"]
-        ).generate_password_hash(otp),
-        expires_at=datetime.utcnow()
-        + timedelta(minutes=OTP_EXPIRY_MINUTES),
-        attempts=0,
-        verified=False
-    )
-
     db.session.add(
-        otp_record
+        OTPVerification(
+            phone=phone,
+            otp_hash=generate_password_hash(otp),
+            expires_at=(
+                datetime.utcnow()
+                + timedelta(
+                    minutes=OTP_EXPIRY_MINUTES
+                )
+            ),
+            attempts=0,
+            verified=False,
+        )
     )
 
     db.session.commit()
 
-    send_otp(
-        phone,
-        otp
-    )
+    send_otp(phone, otp)
 
     return jsonify({
         "message": "OTP sent successfully",
         "phone": phone,
         "expires_in": OTP_EXPIRY_MINUTES * 60,
-        "user_id": user.id
+        "user_id": user.id,
     }), 200
 
 
 # ============================================================
-# AUTH — VERIFY OTP
+# LOGIN
+# ============================================================
+
+@api.post("/auth/login")
+def login():
+    data = request.get_json(silent=True) or {}
+
+    identifier = str(
+        data.get("identifier", "")
+    ).strip()
+
+    password = str(
+        data.get("password", "")
+    )
+
+    # --------------------------------------------------------
+    # VALIDATE INPUT
+    # --------------------------------------------------------
+
+    if not identifier:
+        return jsonify({
+            "error": (
+                "Email address or phone number "
+                "is required"
+            )
+        }), 400
+
+    if not password:
+        return jsonify({
+            "error": "Password is required"
+        }), 400
+
+    # --------------------------------------------------------
+    # FIND ACCOUNT
+    #
+    # identifier can be:
+    #   email
+    #   OR
+    #   phone
+    # --------------------------------------------------------
+
+    user = None
+
+    normalized_phone = normalize_phone(
+        identifier
+    )
+
+    if normalized_phone:
+        user = User.query.filter_by(
+            phone=normalized_phone
+        ).first()
+
+    else:
+        normalized_email = (
+            identifier.lower()
+        )
+
+        if not validate_email(
+            normalized_email
+        ):
+            return jsonify({
+                "error": (
+                    "Enter a valid email "
+                    "address or phone number"
+                )
+            }), 400
+
+        user = User.query.filter_by(
+            email=normalized_email
+        ).first()
+
+    # --------------------------------------------------------
+    # ACCOUNT CHECK
+    # --------------------------------------------------------
+
+    if not user:
+        return jsonify({
+            "error": (
+                "No account found with "
+                "that email or phone number"
+            )
+        }), 401
+
+    # --------------------------------------------------------
+    # PASSWORD CHECK
+    # --------------------------------------------------------
+
+    if (
+        not user.password_hash
+        or not check_password_hash(
+            user.password_hash,
+            password
+        )
+    ):
+        return jsonify({
+            "error": "Incorrect password"
+        }), 401
+
+    # --------------------------------------------------------
+    # PHONE VERIFICATION CHECK
+    # --------------------------------------------------------
+
+    if not user.phone_verified:
+        return jsonify({
+            "error": (
+                "Phone number is not verified. "
+                "Please complete registration first."
+            )
+        }), 403
+
+    # --------------------------------------------------------
+    # CREATE LOGIN OTP
+    # --------------------------------------------------------
+
+    OTPVerification.query.filter_by(
+        phone=user.phone,
+        verified=False
+    ).update({
+        "verified": True
+    })
+
+    otp = generate_otp()
+
+    db.session.add(
+        OTPVerification(
+            phone=user.phone,
+            otp_hash=generate_password_hash(otp),
+            expires_at=(
+                datetime.utcnow()
+                + timedelta(
+                    minutes=OTP_EXPIRY_MINUTES
+                )
+            ),
+            attempts=0,
+            verified=False,
+        )
+    )
+
+    db.session.commit()
+
+    send_otp(user.phone, otp)
+
+    return jsonify({
+        "message": "Login OTP sent successfully",
+        "phone": user.phone,
+        "expires_in": OTP_EXPIRY_MINUTES * 60,
+        "user_id": user.id,
+    }), 200
+
+
+# ============================================================
+# VERIFY OTP
 # ============================================================
 
 @api.post("/auth/verify-otp")
 def verify_otp():
-
-    data = request.get_json(
-        silent=True
-    ) or {}
+    data = request.get_json(silent=True) or {}
 
     phone = normalize_phone(
         data.get("phone")
@@ -329,7 +693,7 @@ def verify_otp():
             "error": "OTP must be 6 digits"
         }), 400
 
-    otp_record = (
+    record = (
         OTPVerification.query
         .filter_by(
             phone=phone,
@@ -341,38 +705,47 @@ def verify_otp():
         .first()
     )
 
-    if not otp_record:
+    if not record:
         return jsonify({
-            "error": "No active OTP found. Please request a new OTP."
+            "error": (
+                "No active OTP found. "
+                "Please request a new OTP."
+            )
         }), 400
 
-    if otp_record.is_expired():
+    if record.is_expired():
         return jsonify({
-            "error": "OTP has expired. Please request a new OTP."
+            "error": (
+                "OTP has expired. "
+                "Please request a new OTP."
+            )
         }), 400
 
-    if otp_record.attempts >= MAX_OTP_ATTEMPTS:
+    if record.attempts >= MAX_OTP_ATTEMPTS:
         return jsonify({
-            "error": "Too many OTP attempts. Please request a new OTP."
+            "error": (
+                "Too many OTP attempts. "
+                "Please request a new OTP."
+            )
         }), 429
 
-    otp_record.attempts += 1
+    record.attempts += 1
 
     if not check_password_hash(
-        otp_record.otp_hash,
+        record.otp_hash,
         otp
     ):
-
         db.session.commit()
 
         return jsonify({
             "error": "Invalid OTP",
-            "attempts_remaining":
+            "attempts_remaining": (
                 MAX_OTP_ATTEMPTS
-                - otp_record.attempts
+                - record.attempts
+            ),
         }), 400
 
-    otp_record.verified = True
+    record.verified = True
 
     user = User.query.filter_by(
         phone=phone
@@ -390,27 +763,20 @@ def verify_otp():
 
     db.session.commit()
 
-    token = create_token(
-        user
-    )
-
     return jsonify({
         "message": "Phone verified successfully",
-        "token": token,
-        "user": user.to_dict()
+        "token": create_token(user),
+        "user": user.to_dict(),
     }), 200
 
 
 # ============================================================
-# AUTH — RESEND OTP
+# RESEND OTP
 # ============================================================
 
 @api.post("/auth/resend-otp")
 def resend_otp():
-
-    data = request.get_json(
-        silent=True
-    ) or {}
+    data = request.get_json(silent=True) or {}
 
     phone = normalize_phone(
         data.get("phone")
@@ -427,13 +793,11 @@ def resend_otp():
 
     if not user:
         return jsonify({
-            "error": "No account found for this phone number"
+            "error": (
+                "No account found for "
+                "this phone number"
+            )
         }), 404
-
-    if user.phone_verified:
-        return jsonify({
-            "error": "Phone number is already verified"
-        }), 400
 
     OTPVerification.query.filter_by(
         phone=phone,
@@ -444,49 +808,42 @@ def resend_otp():
 
     otp = generate_otp()
 
-    otp_record = OTPVerification(
-        phone=phone,
-        otp_hash=__import__(
-            "werkzeug.security",
-            fromlist=["generate_password_hash"]
-        ).generate_password_hash(otp),
-        expires_at=datetime.utcnow()
-        + timedelta(minutes=OTP_EXPIRY_MINUTES),
-        attempts=0,
-        verified=False
-    )
-
     db.session.add(
-        otp_record
+        OTPVerification(
+            phone=phone,
+            otp_hash=generate_password_hash(otp),
+            expires_at=(
+                datetime.utcnow()
+                + timedelta(
+                    minutes=OTP_EXPIRY_MINUTES
+                )
+            ),
+            attempts=0,
+            verified=False,
+        )
     )
 
     db.session.commit()
 
-    send_otp(
-        phone,
-        otp
-    )
+    send_otp(phone, otp)
 
     return jsonify({
         "message": "OTP resent successfully",
         "phone": phone,
-        "expires_in": OTP_EXPIRY_MINUTES * 60
+        "expires_in": OTP_EXPIRY_MINUTES * 60,
     }), 200
 
 
 # ============================================================
-# AUTH — CURRENT USER
+# CURRENT USER
 # ============================================================
 
 @api.get("/auth/me")
 def current_user():
+    user, error = require_auth()
 
-    user = get_auth_user()
-
-    if not user:
-        return jsonify({
-            "error": "Authentication required"
-        }), 401
+    if error:
+        return error
 
     return jsonify({
         "user": user.to_dict()
@@ -499,7 +856,6 @@ def current_user():
 
 @api.get("/workers")
 def get_workers():
-
     service = request.args.get(
         "service",
         ""
@@ -511,7 +867,8 @@ def get_workers():
     ).strip()
 
     query = Worker.query.filter_by(
-        is_active=True
+        is_active=True,
+        is_verified=True
     )
 
     if service:
@@ -536,192 +893,355 @@ def get_workers():
             )
         )
 
-    workers = query.all()
+    workers = (
+        query
+        .order_by(
+            Worker.rating.desc(),
+            Worker.id.asc()
+        )
+        .all()
+    )
 
     return jsonify([
         {
-            "id": worker.id,
-            "name": worker.name,
-            "phone": worker.phone,
-            "email": worker.email,
-
+            "id": w.id,
+            "name": w.name,
+            "phone": w.phone,
+            "email": w.email,
             "avatarInitials": "".join(
                 word[0]
-                for word in worker.name.split()[:2]
+                for word in w.name.split()[:2]
             ).upper(),
-
-            "category": worker.profession.lower(),
-
-            "location":
-                worker.city
-                or worker.service_area
-                or "Location not specified",
-
-            "yearsExperience":
-                worker.experience_years or 0,
-
-            "skills":
-                worker.skills
-                if worker.skills
-                else [worker.profession],
-
-            "startingPrice":
-                float(worker.starting_price or 0),
-
-            "cooperativeId":
-                worker.cooperative_id,
-
-            "rating":
-                float(worker.rating or 0),
-
-            "reviewCount":
-                worker.review_count or 0,
-
-            "verified":
-                bool(worker.is_verified),
-
-            "bio":
-                worker.description
-                or "No description available.",
-
-            "certifications":
-                worker.certifications
-                if worker.certifications
-                else [],
-
-            "availableDays":
-                worker.available_days
-                if worker.available_days
-                else [],
-
-            "emergencyAvailable":
-                bool(worker.emergency_available),
+            "category": (
+                w.profession.lower()
+                if w.profession
+                else ""
+            ),
+            "location": (
+                w.city
+                or w.service_area
+                or "Location not specified"
+            ),
+            "yearsExperience": (
+                w.experience_years or 0
+            ),
+            "skills": (
+                w.skills
+                or [w.profession]
+            ),
+            "startingPrice": float(
+                w.starting_price or 0
+            ),
+            "cooperativeId": w.cooperative_id,
+            "rating": float(
+                w.rating or 0
+            ),
+            "reviewCount": (
+                w.review_count or 0
+            ),
+            "verified": bool(
+                w.is_verified
+            ),
+            "bio": (
+                w.description
+                or "No description available."
+            ),
+            "certifications": (
+                w.certifications or []
+            ),
+            "availableDays": (
+                w.available_days or []
+            ),
+            "emergencyAvailable": bool(
+                w.emergency_available
+            ),
         }
-
-        for worker in workers
+        for w in workers
     ])
 
 
-@api.post("/workers")
-def create_worker():
+# ============================================================
+# WORKER APPLICATION
+# ============================================================
+
+@api.get("/workers/me")
+def worker_application_me():
+    user, error = require_auth()
+
+    if error:
+        return error
+
+    if user.role != "worker":
+        return jsonify({
+            "error": "Worker account required"
+        }), 403
+
+    application = WorkerApplication.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    return jsonify({
+        "application": (
+            application.to_dict()
+            if application
+            else None
+        )
+    })
+
+
+# ============================================================
+# BOOKINGS - GET
+# ============================================================
+
+@api.get("/bookings")
+def get_bookings():
+    user, error = require_auth()
+
+    if error:
+        return error
+
+    if user.role == "worker":
+
+        worker = Worker.query.filter_by(
+            phone=user.phone
+        ).first()
+
+        if not worker:
+            return jsonify([])
+
+        bookings = (
+            Booking.query
+            .filter_by(
+                worker_id=worker.id
+            )
+            .order_by(
+                Booking.date.asc(),
+                Booking.time.asc(),
+                Booking.id.desc()
+            )
+            .all()
+        )
+
+    else:
+
+        bookings = (
+            Booking.query
+            .filter_by(
+                customer_id=user.id
+            )
+            .order_by(
+                Booking.date.asc(),
+                Booking.time.asc(),
+                Booking.id.desc()
+            )
+            .all()
+        )
+
+    return jsonify([
+        b.to_dict(
+            customer=db.session.get(
+                User,
+                b.customer_id
+            ),
+            worker=db.session.get(
+                Worker,
+                b.worker_id
+            ),
+        )
+        for b in bookings
+    ])
+
+
+# ============================================================
+# BOOKINGS - CREATE
+# ============================================================
+
+@api.post("/bookings")
+def create_booking():
+    user, error = require_auth()
+
+    if error:
+        return error
+
+    if user.role != "customer":
+        return jsonify({
+            "error": (
+                "Only customers can "
+                "create bookings"
+            )
+        }), 403
 
     data = request.get_json(
         silent=True
     ) or {}
 
-    required_fields = [
-        "name",
-        "phone",
-        "profession"
-    ]
+    try:
+        worker_id = int(
+            data.get("worker_id")
+        )
+    except (
+        TypeError,
+        ValueError
+    ):
+        worker_id = 0
 
-    for field in required_fields:
-
-        if not data.get(field):
-
-            return jsonify({
-                "error":
-                    f"{field} is required"
-            }), 400
-
-    phone = normalize_phone(
-        data["phone"]
+    worker = db.session.get(
+        Worker,
+        worker_id
     )
 
-    if not phone:
-
+    if (
+        not worker
+        or not worker.is_active
+        or not worker.is_verified
+    ):
         return jsonify({
-            "error":
-                "Valid Indian phone number is required"
+            "error": "Verified worker not found"
+        }), 404
+
+    service = str(
+        data.get(
+            "service",
+            worker.profession
+        )
+    ).strip()
+
+    date = str(
+        data.get("date", "")
+    ).strip()
+
+    time = str(
+        data.get("time", "")
+    ).strip()
+
+    address = str(
+        data.get("address", "")
+    ).strip()
+
+    description = str(
+        data.get("description", "")
+    ).strip()
+
+    if (
+        not service
+        or not date
+        or not time
+        or not address
+    ):
+        return jsonify({
+            "error": (
+                "Service, date, time "
+                "and address are required"
+            )
         }), 400
 
-    existing_worker = Worker.query.filter_by(
-        phone=phone
-    ).first()
+    booking = Booking(
+        customer_id=user.id,
+        worker_id=worker.id,
+        service=service,
+        date=date,
+        time=time,
+        address=address,
+        description=description,
+        status="pending",
+    )
 
-    if existing_worker:
+    db.session.add(booking)
+    db.session.commit()
 
+    return jsonify({
+        "message": "Booking created successfully",
+        "booking": booking.to_dict(
+            user,
+            worker
+        ),
+    }), 201
+
+
+# ============================================================
+# BOOKINGS - UPDATE STATUS
+# ============================================================
+
+@api.patch(
+    "/bookings/<int:booking_id>/status"
+)
+def update_booking_status(booking_id):
+    user, error = require_auth()
+
+    if error:
+        return error
+
+    booking = db.session.get(
+        Booking,
+        booking_id
+    )
+
+    if not booking:
         return jsonify({
-            "error":
-                "Worker with this phone already exists"
-        }), 409
+            "error": "Booking not found"
+        }), 404
 
-    worker = Worker(
-        name=data["name"],
-        phone=phone,
-        email=data.get("email"),
-        profession=data["profession"],
-        description=data.get("description"),
-        experience_years=data.get(
-            "experience_years",
-            0
-        ),
-        city=data.get("city"),
-        service_area=data.get(
-            "service_area"
-        ),
-        latitude=data.get(
-            "latitude"
-        ),
-        longitude=data.get(
-            "longitude"
-        ),
+    data = request.get_json(
+        silent=True
+    ) or {}
 
-        # IMPORTANT:
-        # Publicly-created workers are NOT
-        # automatically official/verified.
-        is_verified=False,
-        is_active=data.get(
-            "is_active",
-            True
-        ),
+    status = str(
+        data.get("status", "")
+    ).strip().lower()
 
-        emergency_available=data.get(
-            "emergency_available",
-            False
-        ),
+    allowed = {
+        "pending",
+        "confirmed",
+        "completed",
+        "cancelled",
+    }
 
-        skills=data.get(
-            "skills",
-            []
-        ),
+    if status not in allowed:
+        return jsonify({
+            "error": "Invalid booking status"
+        }), 400
 
-        certifications=data.get(
-            "certifications",
-            []
-        ),
+    worker = (
+        Worker.query.filter_by(
+            phone=user.phone
+        ).first()
+        if user.role == "worker"
+        else None
+    )
 
-        available_days=data.get(
-            "available_days",
-            []
-        ),
-
-        languages=data.get(
-            "languages",
-            []
-        ),
-
-        starting_price=data.get(
-            "starting_price",
-            0
-        ),
-
-        cooperative_id=data.get(
-            "cooperative_id"
+    if (
+        user.role == "worker"
+        and (
+            not worker
+            or booking.worker_id != worker.id
         )
-    )
+    ):
+        return jsonify({
+            "error": "Not allowed"
+        }), 403
 
-    db.session.add(
-        worker
-    )
+    if (
+        user.role == "customer"
+        and booking.customer_id != user.id
+    ):
+        return jsonify({
+            "error": "Not allowed"
+        }), 403
+
+    booking.status = status
 
     db.session.commit()
 
     return jsonify({
-        "message":
-            "Worker created successfully",
-        "id":
-            worker.id,
-        "verified":
-            worker.is_verified
-    }), 201
+        "message": "Booking updated",
+        "booking": booking.to_dict(
+            db.session.get(
+                User,
+                booking.customer_id
+            ),
+            db.session.get(
+                Worker,
+                booking.worker_id
+            ),
+        ),
+    })
